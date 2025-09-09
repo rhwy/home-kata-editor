@@ -21,12 +21,8 @@ services:
     depends_on:
       dind:
         condition: service_healthy
-    # Option A (when deploying via Compose CLI or raw Docker): publish the port
-    # ports:
-    #   - "8080:8080"
-    # Option B (recommended in Coolify): set "Expose port 8080" in the Coolify UI for this service
     expose:
-      - "8080"
+      - "8080"   # internal only; no host bind
 
 volumes:
   dind-data:
