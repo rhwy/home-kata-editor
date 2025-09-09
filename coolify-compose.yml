@@ -16,13 +16,13 @@ services:
   web:
     build: ./web
     environment:
-      - ASPNETCORE_URLS=http://+:8080
+      - ASPNETCORE_URLS=http://+:8024
       - DOCKER_HOST=tcp://dind:2375
     depends_on:
       dind:
         condition: service_healthy
     expose:
-      - "8080"   # internal only; no host bind
+      - "8024"   # internal only; no host bind
 
 volumes:
   dind-data:
