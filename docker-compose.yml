@@ -1,0 +1,22 @@
+services:
+  dind:
+    image: docker:26-dind
+    privileged: true
+    environment:
+      - DOCKER_TLS_CERTDIR=
+    command: ["--host=tcp://0.0.0.0:2375", "--log-level=error"]
+    networks: [sandboxnet]
+
+  web:
+    build: ./web
+    environment:
+      - ASPNETCORE_URLS=http://+:8080
+      - DOCKER_HOST=tcp://dind:2375
+    depends_on: [dind]
+    ports:
+      - "8080:8080"
+    networks: [sandboxnet]
+
+networks:
+  sandboxnet:
+    driver: bridge

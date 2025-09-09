@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Dotnet Runner PoC</title>
+  <style>
+    html, body { height:100%; margin:0; font-family: system-ui, sans-serif; }
+    header { display:flex; gap:8px; padding:12px; border-bottom:1px solid #ddd; position:sticky; top:0; background:#fff; }
+    button { padding:8px 12px; border:1px solid #ccc; background:#f7f7f7; cursor:pointer; border-radius:6px; }
+    main { display:flex; height:calc(100% - 50px); }
+    #editor { width:66.66%; height:100%; border:none; padding:12px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:14px; resize:none; outline:none; }
+    #output { width:33.33%; height:100%; border-left:1px solid #eee; padding:12px; overflow:auto; white-space:pre-wrap; background:#fafafa; }
+    .status { font-size:12px; color:#666; margin-left:auto; }
+    .err { color:#a00; }
+  </style>
+</head>
+<body>
+  <header>
+    <button id="clearBtn">Clear</button>
+    <button id="runBtn">Run</button>
+    <span class="status" id="status"></span>
+  </header>
+  <main>
+    <textarea id="editor">// Minimal C# sample
+using System;
+
+Console.WriteLine("Hello from .NET inside Docker!");
+for (int i = 0; i < 3; i++) Console.WriteLine($"Count: {i}");</textarea>
+    <div id="output"></div>
+  </main>
+
+<script>
+const editor = document.getElementById('editor');
+const out = document.getElementById('output');
+const status = document.getElementById('status');
+
+document.getElementById('clearBtn').onclick = () => { editor.value = ''; out.textContent=''; status.textContent=''; };
+
+document.getElementById('runBtn').onclick = async () => {
+  out.textContent = '';
+  status.textContent = 'Building...';
+  try {
+    const resp = await fetch('/run', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ code: editor.value })
+    });
+    const data = await resp.json();
+    if (data.buildError) {
+      status.innerHTML = '<span class="err">Build failed</span>';
+      out.textContent = data.output ?? '';
+      return;
+    }
+    status.textContent = `ExitCode: ${data.exitCode ?? 'n/a'}`;
+    out.textContent = (data.output ?? '') + (data.error ? "\n[error] " + data.error : '');
+  } catch (e) {
+    status.innerHTML = '<span class="err">Request failed</span>';
+    out.textContent = String(e);
+  }
+};
+</script>
+</body>
+</html>
