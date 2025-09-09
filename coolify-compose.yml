@@ -21,10 +21,8 @@ services:
     depends_on:
       dind:
         condition: service_healthy
-    expose:
-      - "8024"   # internal only; no host bind
-    labels:
-      - traefik.http.services.web.loadbalancer.server.port=8024
+    ports:
+      - "8024:8024"
 
 volumes:
   dind-data:
