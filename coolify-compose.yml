@@ -1,0 +1,32 @@
+services:
+  dind:
+    image: docker:26-dind
+    privileged: true
+    environment:
+      - DOCKER_TLS_CERTDIR=
+    command: ["--host=tcp://0.0.0.0:2375", "--log-level=error"]
+    volumes:
+      - dind-data:/var/lib/docker
+    healthcheck:
+      test: ["CMD", "docker", "version", "--format", "'{{.Server.Version}}'"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  web:
+    build: ./web
+    environment:
+      - ASPNETCORE_URLS=http://+:8080
+      - DOCKER_HOST=tcp://dind:2375
+    depends_on:
+      dind:
+        condition: service_healthy
+    # Option A (when deploying via Compose CLI or raw Docker): publish the port
+    # ports:
+    #   - "8080:8080"
+    # Option B (recommended in Coolify): set "Expose port 8080" in the Coolify UI for this service
+    expose:
+      - "8080"
+
+volumes:
+  dind-data:
