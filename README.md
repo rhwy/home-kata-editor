@@ -1,11 +1,17 @@
-# .NET Web PoC (v5): named-arg fix for BuildImageFromDockerfileAsync
+# Home code runner
 
-- Fixes the parameter order by using **named arguments** for the progress overload call.
-- Keeps full try/catch and build-log capture; returns build diagnostics on failure, run output on success.
-- Runner base: mcr.microsoft.com/dotnet/nightly/sdk:10.0-preview.
+The target of this project is to have a simple, free, hostable and deployable solution to run code katas collaboratively in teams.
+It uses under the hood DinD (docker in docker) to make edited code running securely in a docker sandbox.
+All is simply deployable through docker compose to hosted servers like Coolify.
+
 
 ## Run
+
+Clone the repo, then compose:
+
 ```bash
 docker compose up --build
 # Open http://localhost:8080
 ```
+
+First spin up could take some time (create the image and build), then next runs will be pretty fast (avg +1s over head on top of the normal .net build/run)

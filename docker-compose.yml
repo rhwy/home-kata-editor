@@ -5,6 +5,14 @@ services:
     environment:
       - DOCKER_TLS_CERTDIR=
     command: ["--host=tcp://0.0.0.0:2375", "--log-level=error"]
+    volumes:
+      - dind-data:/var/lib/docker
+    healthcheck:
+      test: ["CMD", "docker", "version", "--format", "'{{.Server.Version}}'"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    restart: unless-stopped
     networks: [sandboxnet]
 
   web:
@@ -12,11 +20,18 @@ services:
     environment:
       - ASPNETCORE_URLS=http://+:8080
       - DOCKER_HOST=tcp://dind:2375
-    depends_on: [dind]
+      # - RUNNER_ALLOW_RESTORE=1
+    depends_on:
+      dind:
+        condition: service_healthy
     ports:
       - "8080:8080"
+    restart: unless-stopped
     networks: [sandboxnet]
 
 networks:
   sandboxnet:
     driver: bridge
+
+volumes:
+  dind-data:

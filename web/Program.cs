@@ -1,15 +1,50 @@
 
 using Docker.DotNet;
 using Docker.DotNet.Models;
-using System.IO.Compression;
+using System.Formats.Tar;
 using System.Text;
 using System.Text.Json;
 
 var builder = WebApplication.CreateBuilder(args);
+builder.WebHost.UseSetting(WebHostDefaults.DetailedErrorsKey, "true");
 var app = builder.Build();
 
 app.UseDefaultFiles();
 app.UseStaticFiles();
+
+app.MapGet("/healthz", async () =>
+{
+    try
+    {
+        var docker = CreateDocker();
+        await docker.System.PingAsync();
+        var runner = (await docker.Containers.ListContainersAsync(new ContainersListParameters { All = true }))
+            .FirstOrDefault(c => c.Names.Any(n => n.TrimStart('/').Equals("dotnet-runner", StringComparison.Ordinal)));
+        return Results.Ok(new { docker = "ok", runner = runner?.State ?? "missing" });
+    }
+    catch (Exception ex)
+    {
+        return Results.Ok(new { docker = "error", error = ex.Message });
+    }
+});
+
+app.MapGet("/work", async () =>
+{
+    var docker = CreateDocker();
+    try
+    {
+        await WaitForDockerAsync(docker, TimeSpan.FromSeconds(10));
+        var runnerId = await EnsureRunnerAsync(docker);
+        var (exit, output) = await ExecAsync(docker, runnerId,
+            new[] { "sh", "-lc", "pwd; echo; ls -la /work; echo; ls -la /out || true" },
+            TimeSpan.FromSeconds(10));
+        return Results.Text(output, "text/plain");
+    }
+    catch (Exception ex)
+    {
+        return Results.Text("[/work error] " + ex.Message, "text/plain");
+    }
+});
 
 app.MapPost("/run", async (HttpRequest request) =>
 {
@@ -22,127 +57,58 @@ app.MapPost("/run", async (HttpRequest request) =>
         if (code.Length > 200_000)
             return Results.BadRequest(new { error = "too big" });
 
-        var sdkImage = "mcr.microsoft.com/dotnet/nightly/sdk:10.0-preview";
-        var dockerHost = Environment.GetEnvironmentVariable("DOCKER_HOST") ?? "unix:///var/run/docker.sock";
-        var docker = new DockerClientConfiguration(new Uri(dockerHost)).CreateClient();
+        var docker = CreateDocker();
+        await WaitForDockerAsync(docker, TimeSpan.FromSeconds(20));
 
-        var tmpName = Path.GetRandomFileName().Replace(".", "");
-        var imageTag = $"local/dotnet10runner:{tmpName}";
+        var runnerId = await EnsureRunnerAsync(docker);
 
-        var csproj = "<Project Sdk=\"Microsoft.NET.Sdk\">\n" +
-                     "  <PropertyGroup>\n" +
-                     "    <OutputType>Exe</OutputType>\n" +
-                     "    <TargetFramework>net10.0</TargetFramework>\n" +
-                     "    <ImplicitUsings>enable</ImplicitUsings>\n" +
-                     "    <Nullable>enable</Nullable>\n" +
-                     "  </PropertyGroup>\n" +
-                     "</Project>\n";
-
-        var programCs = code;
-
-        var dockerfile =
-            "FROM mcr.microsoft.com/dotnet/nightly/sdk:10.0-preview\n" +
-            "ENV DOTNET_CLI_TELEMETRY_OPTOUT=1 \\\n" +
-            "    DOTNET_NoLogo=1\n" +
-            "WORKDIR /work\n" +
-            "COPY Runner.csproj ./\n" +
-            "RUN dotnet restore --source https://api.nuget.org/v3/index.json --disable-parallel\n" +
-            "COPY Program.cs ./\n" +
-            "RUN dotnet build -c Release -o /out --no-restore\n" +
-            "CMD [\"dotnet\", \"/out/Runner.dll\"]\n";
-
-        // Build gzip'd tar context
-        using var buildContext = new MemoryStream();
-        using (var gz = new GZipStream(buildContext, CompressionLevel.Fastest, leaveOpen: true))
-        {
-            using var tw = new TarWriter(gz, leaveOpen: true);
-            tw.AddFile("Program.cs", Encoding.UTF8.GetBytes(programCs));
-            tw.AddFile("Runner.csproj", Encoding.UTF8.GetBytes(csproj));
-            tw.AddFile("Dockerfile", Encoding.UTF8.GetBytes(dockerfile));
-        }
-        buildContext.Position = 0;
-
-        // Pull base (ignore if already present)
-        try { await docker.Images.CreateImageAsync(new ImagesCreateParameters { FromImage = sdkImage }, null, new Progress<JSONMessage>()); } catch {}
-
-        // Build and wait using progress overload (use named args to avoid signature confusion)
-        var buildLogs = new StringBuilder();
-        var buildHadError = false;
-        var progress = new Progress<JSONMessage>(m =>
-        {
-            if (m == null) return;
-            if (!string.IsNullOrEmpty(m.Stream)) buildLogs.Append(m.Stream);
-            if (!string.IsNullOrEmpty(m.Status)) buildLogs.AppendLine(m.Status);
-            if (m.Error != null && !string.IsNullOrEmpty(m.Error.Message))
-            {
-                buildHadError = true;
-                buildLogs.AppendLine(m.Error.Message);
-            }
-        });
-
-        var buildParams = new ImageBuildParameters
-        {
-            Tags = new[] { imageTag },
-            PullParent = false,
-            Dockerfile = "Dockerfile"
+        var env = new[] {
+            "DOTNET_CLI_TELEMETRY_OPTOUT=1",
+            "DOTNET_NOLOGO=1",
+            "NUGET_HTTP_CACHE_PATH=/root/.nuget/http",
+            "NUGET_PACKAGES=/root/.nuget/packages"
         };
+        var envString = string.Join(";", env);
 
-        await docker.Images.BuildImageFromDockerfileAsync(
-            contents: buildContext,
-            parameters: buildParams,
-            authConfigs: null,
-            headers: null,
-            progress: progress,
-            cancellationToken: CancellationToken.None
-        );
-
-        if (buildHadError)
-        {
-            return Results.Ok(new { buildError = true, output = buildLogs.ToString() });
-        }
-
-        // Run container (no network)
-        var create = await docker.Containers.CreateContainerAsync(new CreateContainerParameters
-        {
-            Image = imageTag,
-            HostConfig = new HostConfig
-            {
-                NetworkMode = "none",
-                Memory = 256 * 1024 * 1024,
-                PidsLimit = 128,
-                ReadonlyRootfs = false,
-                CapDrop = new[] { "ALL" },
-                Ulimits = new[] { new Ulimit { Name = "nofile", Soft = 256, Hard = 256 } }
-            },
-            AttachStdout = true,
-            AttachStderr = true,
-            Tty = false
+        var csproj = GetRunnerCsproj();
+        await PutFilesAsync(docker, runnerId, new Dictionary<string,string> {
+            ["Runner.csproj"] = csproj,
+            ["Program.cs"]    = code
         });
 
-        var id = create.ID;
-        var output = new StringBuilder();
+        var projectPath = "/work/Runner.csproj";
 
-        try
+        // Initial OFFLINE restore to create project.assets.json
+        var (r0Exit, r0Out) = await ExecAsync(docker, runnerId,
+            new[] { "sh", "-lc", $"export {envString}; dotnet restore {projectPath} --disable-parallel --ignore-failed-sources" },
+            TimeSpan.FromSeconds(30));
+        if (r0Exit != 0)
         {
-            await docker.Containers.StartContainerAsync(id, new ContainerStartParameters());
-            var stream = await docker.Containers.AttachContainerAsync(id, false, new ContainerAttachParameters { Stream = true, Stdout = true, Stderr = true });
-            var buffer = new byte[8192];
-            var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
-            while (!cts.IsCancellationRequested)
+            var allowRestore = Environment.GetEnvironmentVariable("RUNNER_ALLOW_RESTORE") == "1";
+            if (allowRestore)
             {
-                var read = await stream.ReadOutputAsync(buffer, 0, buffer.Length, cts.Token);
-                if (read.EOF) break;
-                output.Append(Encoding.UTF8.GetString(buffer, 0, read.Count));
+                var (r1Exit, r1Out) = await ExecAsync(docker, runnerId,
+                    new[] { "sh", "-lc", $"export {envString}; dotnet restore {projectPath} --source https://api.nuget.org/v3/index.json --disable-parallel" },
+                    TimeSpan.FromSeconds(45));
+                if (r1Exit != 0)
+                    return Results.Ok(new { buildError = true, output = r1Out });
             }
-            var wait = await docker.Containers.WaitContainerAsync(id);
-            var exit = wait.StatusCode;
-            return Results.Ok(new { exitCode = exit, output = output.ToString() });
+            else
+            {
+                return Results.Ok(new { buildError = true, output = r0Out });
+            }
         }
-        finally
-        {
-            try { await docker.Containers.RemoveContainerAsync(id, new ContainerRemoveParameters { Force = true }); } catch {}
-            try { await docker.Images.DeleteImageAsync(imageTag, new ImageDeleteParameters { Force = true }); } catch {}
-        }
+
+        var (bExit, bOut) = await ExecAsync(docker, runnerId,
+            new[] { "sh", "-lc", $"export {envString}; dotnet build {projectPath} -c Release -o /out --no-restore" },
+            TimeSpan.FromSeconds(40));
+        if (bExit != 0)
+            return Results.Ok(new { buildError = true, output = bOut });
+
+        var (xExit, xOut) = await ExecAsync(docker, runnerId,
+            new[] { "dotnet", "/out/Runner.dll" },
+            TimeSpan.FromSeconds(10));
+        return Results.Ok(new { exitCode = xExit, output = xOut });
     }
     catch (Exception ex)
     {
@@ -152,44 +118,116 @@ app.MapPost("/run", async (HttpRequest request) =>
 
 app.Run();
 
-// Minimal TAR writer for gzipped tar streams
-public sealed class TarWriter : IDisposable
+// ---- Helpers ----
+
+static DockerClient CreateDocker() =>
+    new DockerClientConfiguration(new Uri(Environment.GetEnvironmentVariable("DOCKER_HOST") ?? "unix:///var/run/docker.sock")).CreateClient();
+
+static async Task WaitForDockerAsync(DockerClient docker, TimeSpan timeout)
 {
-    private readonly Stream _out;
-    private bool _disposed;
-
-    public TarWriter(Stream destination, bool leaveOpen = false)
+    var deadline = DateTime.UtcNow + timeout;
+    while (true)
     {
-        _out = destination;
+        try { await docker.System.PingAsync(); return; }
+        catch { if (DateTime.UtcNow > deadline) throw; await Task.Delay(500); }
+    }
+}
+
+static string GetRunnerCsproj() => string.Join('\n', new[] {
+    "<Project Sdk=\"Microsoft.NET.Sdk\">",
+    "  <PropertyGroup>",
+    "    <OutputType>Exe</OutputType>",
+    "    <TargetFramework>net10.0</TargetFramework>",
+    "    <ImplicitUsings>enable</ImplicitUsings>",
+    "    <Nullable>enable</Nullable>",
+    "  </PropertyGroup>",
+    "</Project>",
+    ""
+});
+
+static async Task<string> EnsureRunnerAsync(DockerClient docker)
+{
+    const string image = "mcr.microsoft.com/dotnet/nightly/sdk:10.0-preview";
+    try { await docker.Images.CreateImageAsync(new ImagesCreateParameters { FromImage = image }, null, new Progress<JSONMessage>()); } catch {}
+
+    var list = await docker.Containers.ListContainersAsync(new ContainersListParameters { All = true });
+    var existing = list.FirstOrDefault(c => c.Names.Any(n => n.TrimStart('/').Equals("dotnet-runner", StringComparison.Ordinal)));
+
+    if (existing is null)
+    {
+        var created = await docker.Containers.CreateContainerAsync(new CreateContainerParameters
+        {
+            Image = image,
+            Name = "dotnet-runner",
+            WorkingDir = "/work",
+            Cmd = new[] { "sh", "-lc", "mkdir -p /work && tail -f /dev/null" },
+            HostConfig = new HostConfig
+            {
+                NetworkMode = "none",
+                Binds = new List<string> { "runner-nuget:/root/.nuget/packages" },
+                CapDrop = new[] { "ALL" },
+                Memory = 512 * 1024 * 1024,
+                PidsLimit = 256
+            }
+        });
+        await docker.Containers.StartContainerAsync(created.ID, new ContainerStartParameters());
+        return created.ID;
     }
 
-    public void AddFile(string name, byte[] content)
-    {
-        var header = new byte[512];
-        var nameBytes = Encoding.ASCII.GetBytes(name);
-        Array.Copy(nameBytes, header, Math.Min(nameBytes.Length, 100));
-        var mode = Encoding.ASCII.GetBytes(Convert.ToString(420, 8).PadLeft(7, '0') + "\0"); // 0644
-        Array.Copy(mode, 0, header, 100, mode.Length);
-        var sizeOct = Encoding.ASCII.GetBytes(Convert.ToString(content.Length, 8).PadLeft(11, '0') + "\0");
-        Array.Copy(sizeOct, 0, header, 124, sizeOct.Length);
-        var timeOct = Encoding.ASCII.GetBytes(Convert.ToString((int)DateTimeOffset.UtcNow.ToUnixTimeSeconds(), 8).PadLeft(11, '0') + "\0");
-        Array.Copy(timeOct, 0, header, 136, timeOct.Length);
-        header[156] = (byte)'0'; // regular file
-        for (int i = 148; i < 156; i++) header[i] = 0x20;
-        int sum = 0; foreach (var b in header) sum += b;
-        var chk = Encoding.ASCII.GetBytes(Convert.ToString(sum, 8).PadLeft(6, '0') + "\0 ");
-        Array.Copy(chk, 0, header, 148, chk.Length);
+    if (!string.Equals(existing.State, "running", StringComparison.OrdinalIgnoreCase))
+        await docker.Containers.StartContainerAsync(existing.ID, new ContainerStartParameters());
 
-        _out.Write(header, 0, 512);
-        _out.Write(content, 0, content.Length);
-        var pad = (512 - (content.Length % 512)) % 512;
-        if (pad > 0) _out.Write(new byte[pad], 0, pad);
-    }
+    return existing.ID;
+}
 
-    public void Dispose()
+static async Task PutFilesAsync(DockerClient docker, string containerId, Dictionary<string,string> files)
+{
+    using var ms = new MemoryStream();
+    using (var tw = new TarWriter(ms, TarEntryFormat.Pax, leaveOpen: true))
     {
-        if (_disposed) return;
-        _disposed = true;
-        _out.Write(new byte[1024], 0, 1024);
+        foreach (var kv in files)
+        {
+            var entry = new PaxTarEntry(TarEntryType.RegularFile, kv.Key.Replace('\\','/'));
+            entry.Mode = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.GroupRead | UnixFileMode.OtherRead;
+            entry.ModificationTime = DateTimeOffset.UtcNow;
+            var data = Encoding.UTF8.GetBytes(kv.Value);
+            entry.DataStream = new MemoryStream(data);
+            //entry.Size = data.Length;
+            tw.WriteEntry(entry);
+        }
     }
+    ms.Position = 0;
+    await docker.Containers.ExtractArchiveToContainerAsync(containerId, new ContainerPathStatParameters { Path = "/work" }, ms);
+}
+
+static async Task<(int exit, string output)> ExecAsync(DockerClient docker, string containerId, string[] cmd, TimeSpan? timeout = null)
+{
+    var exec = await docker.Exec.ExecCreateContainerAsync(containerId, new ContainerExecCreateParameters
+    {
+        AttachStdout = true,
+        AttachStderr = true,
+        Tty = false,
+        Cmd = cmd,
+        WorkingDir = "/work"
+    });
+
+    using var stream = await docker.Exec.StartAndAttachContainerExecAsync(exec.ID, tty: false);
+    var sb = new StringBuilder();
+    var buf = new byte[8192];
+    var cts = new CancellationTokenSource(timeout ?? TimeSpan.FromSeconds(15));
+
+    try
+    {
+        while (!cts.IsCancellationRequested)
+        {
+            var read = await stream.ReadOutputAsync(buf, 0, buf.Length, cts.Token);
+            if (read.EOF) break;
+            sb.Append(Encoding.UTF8.GetString(buf, 0, read.Count));
+        }
+    }
+    catch { }
+
+    var inspect = await docker.Exec.InspectContainerExecAsync(exec.ID);
+    var code = (int)inspect.ExitCode;
+    return (code, sb.ToString());
 }

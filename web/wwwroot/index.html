@@ -3,11 +3,11 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>Dotnet Runner PoC</title>
+  <title>Dotnet Runner PoC (v6.6)</title>
   <style>
     html, body { height:100%; margin:0; font-family: system-ui, sans-serif; }
-    header { display:flex; gap:8px; padding:12px; border-bottom:1px solid #ddd; position:sticky; top:0; background:#fff; }
-    button { padding:8px 12px; border:1px solid #ccc; background:#f7f7f7; cursor:pointer; border-radius:6px; }
+    header { display:flex; gap:8px; padding:12px; border-bottom:1px solid #ddd; position:sticky; top:0; background:#fff; align-items:center; }
+    button, a.btn { padding:8px 12px; border:1px solid #ccc; background:#f7f7f7; cursor:pointer; border-radius:6px; text-decoration:none; color:inherit; }
     main { display:flex; height:calc(100% - 50px); }
     #editor { width:66.66%; height:100%; border:none; padding:12px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:14px; resize:none; outline:none; }
     #output { width:33.33%; height:100%; border-left:1px solid #eee; padding:12px; overflow:auto; white-space:pre-wrap; background:#fafafa; }
@@ -19,13 +19,15 @@
   <header>
     <button id="clearBtn">Clear</button>
     <button id="runBtn">Run</button>
+    <a class="btn" href="/work" target="_blank">/work</a>
+    <a class="btn" href="/healthz" target="_blank">/healthz</a>
     <span class="status" id="status"></span>
   </header>
   <main>
     <textarea id="editor">// Minimal C# sample
 using System;
 
-Console.WriteLine("Hello from .NET inside Docker!");
+Console.WriteLine("Hello from persistent .NET runner (v6.6)!");
 for (int i = 0; i < 3; i++) Console.WriteLine($"Count: {i}");</textarea>
     <div id="output"></div>
   </main>
@@ -39,7 +41,7 @@ document.getElementById('clearBtn').onclick = () => { editor.value = ''; out.tex
 
 document.getElementById('runBtn').onclick = async () => {
   out.textContent = '';
-  status.textContent = 'Building...';
+  status.textContent = 'Running...';
   try {
     const resp = await fetch('/run', {
       method: 'POST',

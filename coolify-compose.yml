@@ -10,19 +10,24 @@ services:
     healthcheck:
       test: ["CMD", "docker", "version", "--format", "'{{.Server.Version}}'"]
       interval: 10s
-      timeout: 3s
-      retries: 5
+      timeout: 5s
+      retries: 6
+    restart: unless-stopped
 
   web:
     build: ./web
     environment:
       - ASPNETCORE_URLS=http://+:8024
       - DOCKER_HOST=tcp://dind:2375
+      # - RUNNER_ALLOW_RESTORE=1
     depends_on:
       dind:
         condition: service_healthy
-    ports:
-      - "8024:8024"
+    expose:
+      - "8024"
+    labels:
+      - traefik.http.services.web.loadbalancer.server.port=8024
+    restart: unless-stopped
 
 volumes:
   dind-data:
